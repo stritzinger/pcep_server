@@ -1,0 +1,16 @@
+{"1.2.0",
+[{<<"codec_sequencer">>,
+  {git,"git@github.com:stritzinger/codec_sequencer.git",
+       {ref,"fc8760894f7962ef1497bf6ce4247eb75db9d5ca"}},
+  1},
+ {<<"pcep_codec">>,
+  {git,"git@github.com:stritzinger/pcep_codec.git",
+       {ref,"0ced9e0c2bf9c01a73c454a8f88f7c717dcabf06"}},
+  0},
+ {<<"ranch">>,{pkg,<<"ranch">>,<<"2.0.0">>},0}]}.
+[
+{pkg_hash,[
+ {<<"ranch">>, <<"FBF3D79661C071543256F9051CAF19D65DAA6DF1CF6824D8F37A49B19A66F703">>}]},
+{pkg_hash_ext,[
+ {<<"ranch">>, <<"C20A4840C7D6623C19812D3A7C828B2F1BD153EF0F124CB69C54FE51D8A42AE0">>}]}
+].

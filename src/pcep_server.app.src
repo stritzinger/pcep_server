@@ -1,0 +1,17 @@
+{application, pcep_server,
+ [{description, "A PCEP Server Library"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {pcep_server_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    ranch,
+    pcep_codec
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
