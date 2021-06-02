@@ -64,7 +64,10 @@
     deadtimer_timeout,
     required_caps = [],
     peer_caps = [],
-    peer_msd
+    peer_msd,
+    plspid,
+    srpid,
+    lsp
 }).
 
 
@@ -184,7 +187,7 @@ callback_mode() -> [handle_event_function, state_enter].
 %-- OPENWAIT STATE -------------------------------------------------------------
 handle_event(enter, _, openwait,
              #data{proto = Proto, openwait_timeout = OpenWaitTimeout} = Data) ->
-    log_debug(Data, "Sending open message and waiting for peer's"),
+    % log_debug(Data, "Sending open message and waiting for peer's"),
     Msg = #pcep_msg_open{open = handshake_start(Data)},
     gen_pcep_protocol:send(Proto, Msg),
     {keep_state, Data, [{state_timeout, OpenWaitTimeout, openwait_timeout}]};
@@ -212,7 +215,7 @@ handle_event(cast, {pcep, Msg}, openwait, Data) ->
 %-- KEEPWAIT STATE -------------------------------------------------------------
 handle_event(enter, _, keepwait,
              #data{keepwait_timeout = KeepWaitTimeout} = Data) ->
-    log_debug(Data, "Sending first keep-alive message and waiting for peer's"),
+    % log_debug(Data, "Sending first keep-alive message and waiting for peer's"),
     send_keepalive(Data),
     {keep_state, Data, [
         {state_timeout, KeepWaitTimeout, keepwait_timeout}
@@ -291,6 +294,8 @@ handle_event(cast, {pcep, #pcep_msg_error{error_list = Errors}},
         {noreply, NewData} ->
             {keep_state, NewData, update_deadtimer(Data)}
     end;
+handle_event(info, {update, Key}, ready, Data) ->
+    {keep_state, update_route(Data, Key)};
 %-- ANY STATE ------------------------------------------------------------------
 handle_event(cast, {pcep, #pcep_msg_close{close = Close}}, _State, Data) ->
     Reason = Close#pcep_obj_close.reason,
@@ -311,8 +316,8 @@ handle_event({timeout, deadtimer}, deadtimer, _State, Data) ->
 handle_event(cast, connection_closed, _State, Data) ->
     log_info(Data, "Connection closed by peer ????"),
     stop_session(Data, closed);
-handle_event(cast, {warn, _, Warn}, _State, Data) ->
-    log_warn(Data, Warn),
+handle_event(cast, {warn, _, _Warn}, _State, Data) ->
+    % log_warn(Data, Warn),
     {keep_state, Data};
 handle_event(cast, {error, connection, Reason}, _State, Data) ->
     log_info(Data, "Connection error ~w", [Reason]),
@@ -354,8 +359,8 @@ log_info(#data{id = Id}, Fmt) ->
 log_info(#data{id = Id}, Fmt, Args) ->
     logger:info("[~s] " ++ Fmt, [Id | Args]).
 
-log_warn(#data{id = Id}, Map) when is_map(Map) ->
-    logger:warning(Map#{peer => Id}).
+% log_warn(#data{id = Id}, Map) when is_map(Map) ->
+%     logger:warning(Map#{peer => Id}).
 
 log_warn(#data{id = Id}, Fmt, Args) ->
     logger:warning("[~s] " ++ Fmt, [Id | Args]).
@@ -570,7 +575,7 @@ synchronize_reports(Data, [#pcep_report{
 synchronize_reports(Data, [#pcep_report{
         lsp = #pcep_obj_lsp{flag_s = true}} = _Report | Rest]) ->
     %TODO: call handler
-    log_debug(Data, "Received synchronization report"),
+    % log_debug(Data, "Received synchronization report"),
     synchronize_reports(Data, Rest).
 
 synchronize_errors(Data, []) ->
@@ -610,20 +615,133 @@ make_pcep_error(ErrT, ErrV) ->
 
 %-- PCEP Message Handlers ------------------------------------------------------
 
+update_route(#data{proto = Proto, srpid = SRPID, lsp = LSP} = Data, {From, To}) ->
+    case pcep_server_database:resolve(From, To) of
+        error -> 
+            log_warn(Data, "Couldn't resolve updated route from ~s to ~s",
+                     [inet:ntoa(From), inet:ntoa(To)]),
+            Data;
+        {ok, Labels} ->
+            log_info(Data, "Updating route from ~s to ~s with ~w",
+                     [inet:ntoa(From), inet:ntoa(To), Labels]),
+            Msg = #pcep_msg_update{
+                update_list = [
+                    #pcep_update{
+                        srp = #pcep_obj_srp{
+                            srp_id = SRPID + 1,
+                            tlvs = [#pcep_tlv_path_setup_type{pst = srte}]
+                        },
+                        lsp = LSP,
+                        ero = make_ero(Labels)
+                    }
+                ]
+            },
+            gen_pcep_protocol:send(Proto, Msg),
+            Data#data{srpid = SRPID + 1}
+    end.
+
 handle_reports(Data, []) ->
     {noreply, Data};
-handle_reports(Data, [_Report | Rest]) ->
-    %TODO: call handler
-    log_debug(Data, "Received report"),
-    handle_reports(Data, Rest).
+handle_reports(#data{plspid = CurrPLSPID} = Data, [Report | Rest]) ->
+    #pcep_report{
+        srp = _SRP,
+        lsp = #pcep_obj_lsp{
+            flag_d = D,
+            plsp_id = PLSPID,
+            status = Status,
+            tlvs = [
+                #pcep_tlv_ipv4_lsp_id{
+                    source = Src,
+                    endpoint = Dst
+                }
+            |_]
+        } = LSP
+    } = Report,
+
+    case {D, CurrPLSPID}  of
+        {false, _} ->
+            log_info(Data, "Undelegated route from ~s to ~s status: ~w",
+                     [inet:ntoa(Src), inet:ntoa(Dst), Status]),
+            handle_reports(Data, Rest);
+        {true, undefined} ->
+            log_info(Data, "New delegated route from ~s to ~s status: ~w",
+                     [inet:ntoa(Src), inet:ntoa(Dst), Status]),
+            pcep_server_database:register(Src, Dst, self()),
+            handle_reports(Data#data{plspid = PLSPID, srpid = 0, lsp = LSP}, Rest);
+        {true, PLSPID} ->
+            log_info(Data, "Delegated route from ~s to ~s status: ~w",
+                     [inet:ntoa(Src), inet:ntoa(Dst), Status]),
+            handle_reports(Data, Rest)
+    end.
 
 handle_requests(Data, []) ->
     {noreply, Data};
-handle_requests(Data, [_Request | Rest]) ->
+handle_requests(#data{proto = Proto} = Data, [Request | Rest]) ->
     %TODO: Check RP's P flag : https://tools.ietf.org/html/rfc5440#section-7.4
-    %TODO: Check Endpoint(s)'s P flag : https://tools.ietf.org/html/rfc5440#section-7.6
-    log_debug(Data, "Received computation request"),
-    handle_requests(Data, Rest).    
+    %TODO: Check Endpoint(s)'s P flag : https://tools.ietf.org/html/rfc5440#section-7.6 
+    #pcep_compreq{
+        rp = RP,
+        endpoints = [
+            #pcep_endpoint{
+                endpoint = #pcep_obj_endpoint_ipv4_addr{
+                    source = Src,
+                    destination = Dst
+                }
+            }
+        ]
+    } = Request,
+    log_info(Data, "Received computation request for route from ~s to ~s",
+              [inet:ntoa(Src), inet:ntoa(Dst)]),
+    case pcep_server_database:resolve(Src, Dst) of
+        error ->
+            log_info(Data, "No route found from from ~s to ~s",
+                     [inet:ntoa(Src), inet:ntoa(Dst)]),
+            Resp = #pcep_msg_comprep{
+                reply_list = [
+                    #pcep_comprep{
+                        rp = RP,
+                        nopath = #pcep_obj_nopath{}
+                    }
+                ]
+            },
+            gen_pcep_protocol:send(Proto, Resp),
+            handle_requests(Data, Rest);
+        {ok, Labels} ->
+            log_info(Data, "Computed route from ~s to ~s: ~w",
+                     [inet:ntoa(Src), inet:ntoa(Dst), Labels]),
+            Resp = #pcep_msg_comprep{
+                reply_list = [
+                    #pcep_comprep{
+                        rp = RP,
+                        endpoints = [
+                            #pcep_endpoint{
+                                paths = [
+                                    #pcep_path{
+                                        ero = make_ero(Labels)
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+            gen_pcep_protocol:send(Proto, Resp),
+            handle_requests(Data, Rest)
+    end.
+
+make_ero(Labels) ->
+    #pcep_obj_ero{
+        path = [
+            #pcep_ro_subobj_sr{
+                has_sid = true,
+                nai_type = ipv4_adjacency,
+                is_mpls = true,
+                sid = #mpls_stack_entry{
+                    label = L
+                }
+            } || L <- Labels
+        ]
+    }.
 
 handle_notifications(Data, []) ->
     {noreply, Data};

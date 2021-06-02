@@ -31,6 +31,11 @@ init([]) ->
         intensity => 0,
         period => 1
     },
+    DatabaseSpec = #{
+            id => pcep_server_database,
+            start => {pcep_server_database, start_link, []},
+            restart => permanent
+    },
     SessSupSpec = #{
             id => pcep_server_session_sup,
             start => {pcep_server_session_sup, start_link, []},
@@ -42,5 +47,5 @@ init([]) ->
         ranch_tcp, #{socket_opts => [{port, 4189}]},
         pcep_server_protocol, [{pcep_server_session_sup, []}]
     ),
-    {ok, {SupFlags, [SessSupSpec, ListenerSpec]}}.
+    {ok, {SupFlags, [DatabaseSpec, SessSupSpec, ListenerSpec]}}.
 

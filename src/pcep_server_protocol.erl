@@ -73,8 +73,8 @@ handle_call(Request, From, #state{id = Id} = State) ->
     {reply, {error, unexpected_call}, State}.
 
 handle_cast({send, Msg}, #state{sock = S, tran = T,
-                                sess = Sess, id = Id} = State) ->
-    logger:debug("[~s] >>>>> ~w", [Id, Msg]),
+                                sess = Sess, id = _Id} = State) ->
+    % logger:debug("[~s] >>>>> ~w", [Id, Msg]),
     case pcep_codec:encode(Msg) of
         {error, _Reason, Error, Warnings} ->
             gen_pcep_proto_session:encoding_error(Sess, Error),
@@ -133,7 +133,7 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
 decode(#state{buff = Buff} = State, Data) ->
     decode_loop(State#state{buff = <<Buff/binary, Data/binary>>}).
 
-decode_loop(#state{buff = Buff, sess = Sess, id = Id} = State) ->   
+decode_loop(#state{buff = Buff, sess = Sess, id = _Id} = State) ->   
     case pcep_codec:decode(Buff) of
         {more, _Length} ->
             %TODO: if the buffer grows too much, close the connection
@@ -143,7 +143,7 @@ decode_loop(#state{buff = Buff, sess = Sess, id = Id} = State) ->
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             decode_loop(State#state{buff = RemData});
         {ok, Msg, Warnings, RemData} ->
-            logger:debug("[~s] <<<<< ~w", [Id, Msg]),
+            % logger:debug("[~s] <<<<< ~w", [Id, Msg]),
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             gen_pcep_proto_session:pcep_message(Sess, Msg),
             decode_loop(State#state{buff = RemData})
