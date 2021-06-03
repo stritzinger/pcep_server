@@ -31,7 +31,7 @@
 
 %%% RECORDS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
--record(state, {sock, tran, buff, id, sess}).
+-record(state, {sock, tran, buff, peer, tag, sess}).
 
 
 %%% MACROS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -45,7 +45,7 @@ send(Ref, Msg) ->
     gen_server:cast(Ref, {send, Msg}).
 
 close(Ref) ->
-    gen_server:cast(Ref, close).    
+    gen_server:cast(Ref, close).
 
 
 %%% Behaviour ranch_protocol FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -59,22 +59,21 @@ start_link(Ref, Transport, Opts) ->
 init({Ref, Transport, [Factory]}) ->
     {ok, Socket} = ranch:handshake(Ref),
     Proto = gen_pcep_protocol:new(?MODULE, self()),
-    {ok, {Addr, _Port}} = Transport:peername(Socket),
-    Id = list_to_binary(inet:ntoa(Addr)),
-    {ok, Sess} = gen_pcep_session_factory:start_session(Factory, Proto, Id),
+    {ok, {Addr, _} = Peer} = Transport:peername(Socket),
+    Tag = list_to_binary(inet:ntoa(Addr)),
+    {ok, Sess} = gen_pcep_session_factory:start_session(Factory, Proto, Peer),
     ok = Transport:setopts(Socket, [{active, ?ACTIVE_COUNT}]),
     State = #state{sock = Socket, tran = Transport, buff = <<>>,
-                   id = Id, sess = Sess},
+                   peer = Peer, tag = Tag, sess = Sess},
     gen_server:enter_loop(?MODULE, [], State).
 
-handle_call(Request, From, #state{id = Id} = State) ->
+handle_call(Request, From, #state{tag = Tag} = State) ->
     logger:warning("[~s] PCEP server protocol received unexpected call from ~w: ~w",
-                   [Id, From, Request]),
+                   [Tag, From, Request]),
     {reply, {error, unexpected_call}, State}.
 
 handle_cast({send, Msg}, #state{sock = S, tran = T,
-                                sess = Sess, id = Id} = State) ->
-    logger:debug("[~s] >>>>> ~w", [Id, Msg]),
+                                sess = Sess, tag = _Tag} = State) ->
     case pcep_codec:encode(Msg) of
         {error, _Reason, Error, Warnings} ->
             gen_pcep_proto_session:encoding_error(Sess, Error),
@@ -85,13 +84,13 @@ handle_cast({send, Msg}, #state{sock = S, tran = T,
             T:send(S, Data),
             {noreply, State}
     end;
-handle_cast(close, #state{sock = S, tran = T, id = Id} = State) ->
-    logger:debug("[~s] Closing PCEP protocol transport", [Id]),
+handle_cast(close, #state{sock = S, tran = T, tag = Tag} = State) ->
+    logger:debug("[~s] Closing PCEP protocol transport", [Tag]),
     T:close(S),
     {noreply, State};
-handle_cast(Request, #state{id = Id} = State) ->
+handle_cast(Request, #state{tag = Tag} = State) ->
     logger:warning("[~s] PCEP server protocol received unexpected cast: ~w",
-                   [Id, Request]),
+                   [Tag, Request]),
     {noreply, State}.
 
 handle_info({tcp, Sock, Data},
@@ -109,9 +108,9 @@ handle_info({tcp_error, Sock, Reason},
             #state{sock = Sock, sess = Sess} = State) ->
     gen_pcep_proto_session:connection_error(Sess, Reason),
     {stop, Reason, State};
-handle_info(Info, #state{id = Id} = State) ->
+handle_info(Info, #state{tag = Tag} = State) ->
     logger:warning("[~s] PCEP server protocol received unexpected message: ~w",
-                   [Id, Info]),
+                   [Tag, Info]),
     {noreply, State}.
 
 
@@ -133,7 +132,7 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
 decode(#state{buff = Buff} = State, Data) ->
     decode_loop(State#state{buff = <<Buff/binary, Data/binary>>}).
 
-decode_loop(#state{buff = Buff, sess = Sess, id = Id} = State) ->   
+decode_loop(#state{buff = Buff, sess = Sess, tag = _Tag} = State) ->
     case pcep_codec:decode(Buff) of
         {more, _Length} ->
             %TODO: if the buffer grows too much, close the connection
@@ -143,10 +142,8 @@ decode_loop(#state{buff = Buff, sess = Sess, id = Id} = State) ->
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             decode_loop(State#state{buff = RemData});
         {ok, Msg, Warnings, RemData} ->
-            logger:debug("[~s] <<<<< ~w", [Id, Msg]),
+            % logger:debug("[~s] <<<<< ~w", [_Tag, Msg]),
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             gen_pcep_proto_session:pcep_message(Sess, Msg),
             decode_loop(State#state{buff = RemData})
     end.
-
-

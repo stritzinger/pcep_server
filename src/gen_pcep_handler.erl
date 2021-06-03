@@ -8,113 +8,95 @@
 
 %%% BEHAVIOUR %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
--callback init(Id :: binary(), Args :: term()) ->
+-callback init(Args :: term()) ->
 	{ok, Opts :: init_opts(), State :: term()}.
 
--callback ready(Id :: binary(), PeerCaps :: [pcep_session_capability()],
-                State :: term()) -> {ok, State :: term()}.
+-callback opened(Id :: inet:ip_address(),
+                 PeerCaps :: [pcep_session_capability()],
+                 Session :: pid(), State :: term()) ->
+    {ok, State :: term()}.
 
--callback synchronize_lsp(State :: term()) -> {ok, State :: term()}.
+-callback flow_added(Flow :: te_flow(), State :: term()) ->
+    {ok, State :: term()} | {error, Reason :: term()}.
 
--callback request_lsp(State :: term()) -> {ok, State :: term()}.
+-callback ready(State :: term()) ->
+    {ok, State :: term()}.
 
--callback lsp_status_update(State :: term()) -> {ok, State :: term()}.
+-callback request_route(te_route_request(), State :: term())
+    -> {ok, te_route(), State :: term()}
+     | {error, computation_error(), [te_flow_constraint()]}
+     | {error, computation_error()}.
 
--callback lsp_delegated(State :: term()) -> {ok, State :: term()}.
+-callback flow_delegated(te_flow(), State :: term())
+    -> {ok, State :: term()}
+     | {error, Reason :: term()}.
 
--callback lsp_revoked(State :: term()) -> {ok, State :: term()}.
-
--callback lsp_deleted(State :: term()) -> {ok, State :: term()}.
-
--callback lsp_update_unacceptable(State :: term()) -> {ok, State :: term()}.
-
--callback invalid_operation(State :: term()) -> {ok, State :: term()}.
-
--callback lsp_initiated(State :: term()) -> {ok, State :: term()}.
-
--callback lsp_updated(State :: term()) -> {ok, State :: term()}.
+-callback flow_status_changed(FlowId :: flow_id(), NewStatus :: te_opstatus(),
+                              State :: term()) -> {ok, State :: term()}.
 
 -callback terminate(Reason :: term(), State :: term()) -> ok.
 
 
+%%% TYPES %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+-type computation_error() :: path_not_found
+                           | pce_chain_broken
+                           | pce_unavailable
+                           | unknown_destination
+                           | unknown_source.
+
+
 %%% EXPORTS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
--export([init/2]).
--export([ready/3]).
--export([synchronize_lsp/1]).
--export([request_lsp/1]).
--export([lsp_status_update/1]).
--export([lsp_delegated/1]).
--export([lsp_revoked/1]).
--export([lsp_deleted/1]).
--export([lsp_update_unacceptable/1]).
--export([invalid_operation/1]).
--export([lsp_initiated/1]).
--export([lsp_updated/1]).
+-export([init/1]).
+-export([opened/4]).
+-export([flow_added/2]).
+-export([ready/1]).
+-export([request_route/2]).
+-export([flow_delegated/2]).
+-export([flow_status_changed/3]).
 -export([terminate/2]).
 
 
 %%% API FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-init(Id, {Mod, Args}) ->
-	case Mod:init(Id, Args) of
+init({Mod, Args}) ->
+	case Mod:init(Args) of
 		{ok, Opts, State} -> {ok, Opts, {Mod, State}}
 	end.
 
-ready(Id, Caps, {Mod, State}) ->
-    case Mod:ready(Id, Caps, State) of
+opened(Id, Caps, Sess, {Mod, State}) ->
+    case Mod:opened(Id, Caps, Sess, State) of
         {ok, NewState} -> {ok, {Mod, NewState}}
     end.
 
-synchronize_lsp({Mod, State}) ->
-	case Mod:synchronize_lsp(State) of
+flow_added(Flow, {Mod, State}) ->
+	case Mod:flow_added(Flow, State) of
+        {error, _Reason} = Error -> Error;
 		{ok, NewState} -> {ok, {Mod, NewState}}
 	end.
 
-request_lsp({Mod, State}) ->
-	case Mod:request_lsp(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
+ready({Mod, State}) ->
+    case Mod:ready(State) of
+        {ok, NewState} -> {ok, {Mod, NewState}}
+    end.
+
+request_route(RouteReq, {Mod, State}) ->
+	case Mod:request_route(RouteReq, State) of
+		{ok, Route, NewState} -> {ok, Route, {Mod, NewState}};
+        {error, _Reason, _Constraints} = Error -> Error;
+        {error, _Reason} = Error -> Error
 	end.
 
-lsp_status_update({Mod, State}) ->
-	case Mod:lsp_status_update(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
+flow_delegated(Flow, {Mod, State}) ->
+    case Mod:flow_delegated(Flow, State) of
+        {ok, NewState} -> {ok, {Mod, NewState}};
+        {error, _Reason} = Error -> Error
+    end.
 
-lsp_delegated({Mod, State}) ->
-	case Mod:lsp_delegated(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-lsp_revoked({Mod, State}) ->
-	case Mod:lsp_revoked(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-lsp_deleted({Mod, State}) ->
-	case Mod:lsp_deleted(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-lsp_update_unacceptable({Mod, State}) ->
-	case Mod:lsp_update_unacceptable(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-invalid_operation({Mod, State}) ->
-	case Mod:invalid_operation(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-lsp_initiated({Mod, State}) ->
-	case Mod:lsp_initiated(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
-
-lsp_updated({Mod, State}) ->
-	case Mod:lsp_updated(State) of
-		{ok, NewState} -> {ok, {Mod, NewState}}
-	end.
+flow_status_changed(FlowId, NewStatus, {Mod, State}) ->
+    {ok, NewState} = Mod:flow_status_changed(FlowId, NewStatus, State),
+    {ok, {Mod, NewState}}.
 
 terminate(Reason, {Mod, State}) ->
     Mod:terminate(Reason, State).

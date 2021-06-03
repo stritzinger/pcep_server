@@ -3,7 +3,8 @@
 
 %%% BEHAVIOUR %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
--callback start_session(Proto :: term(), Id :: binary(), Args :: list()) ->
+-callback start_session(Proto :: term(),
+        Peer :: {inet:ip_address(), inet:port_number()}, Args :: list()) ->
 	{ok, Sess :: term()} | {error, Reason :: term()}.
 
 
@@ -14,4 +15,4 @@
 
 %%% API FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-start_session({Mod, Args}, Proto, Id) -> Mod:start_session(Proto, Id, Args).
+start_session({Mod, Args}, Proto, Peer) -> Mod:start_session(Proto, Peer, Args).

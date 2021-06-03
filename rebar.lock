@@ -5,7 +5,7 @@
   1},
  {<<"pcep_codec">>,
   {git,"git@github.com:stritzinger/pcep_codec.git",
-       {ref,"0ced9e0c2bf9c01a73c454a8f88f7c717dcabf06"}},
+       {ref,"3d1623fdf0c62d3daf400ac65aaf985f8bd40835"}},
   0},
  {<<"ranch">>,{pkg,<<"ranch">>,<<"2.0.0">>},0}]}.
 [
