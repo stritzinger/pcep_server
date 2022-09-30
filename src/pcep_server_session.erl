@@ -30,6 +30,10 @@
     -> {ok, NewRoute :: te_route()}
      | {error, Reason :: term()}.
 
+-callback initiate_flow(pid(), Route :: te_route_initiate() )
+    -> {ok, Flow :: te_flow()}
+     | {error, Reason :: term()}.
+
 
 %%% EXPORTS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -38,6 +42,7 @@
 
 % Behaviour pcep_server_session functions
 -export([update_flow/3]).
+-export([initiate_flow/2]).
 
 % Behaviour gen_pcep_proto_session functions
 -export([connection_closed/1]).
@@ -70,7 +75,7 @@
     sid,
     peer_msd,
     next_srp_id = 1,
-    pending_updates = #{},
+    pending_reports = #{},
     sync_proc,
     flows
 }).
@@ -99,6 +104,9 @@ start_link(HandlerParams, Proto, Peer) ->
 
 update_flow(Pid, FlowId, Route) ->
     gen_statem:call(Pid, {update_flow, FlowId, Route}).
+
+initiate_flow(Pid, InitRoute) ->
+    gen_statem:call(Pid, {initiate_flow, InitRoute}).
 
 
 %%% Behaviour gen_pcep_proto_session FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -165,7 +173,7 @@ handle_event(cast, {pcep, #pcep_msg_error{error_list = Errors}},
     {close, Data2} = handshake_errors(Data, Errors),
     stop_session(Data2, handshake_error);
 handle_event(cast, {pcep, Msg}, openwait, Data) ->
-    log_error(Data, "Unexpected PCEP message ~w received before OPEN",
+    log_error(Data, "Unexpected PCEP message ~peer_caps received before OPEN",
               [element(1, Msg)]),
     stop_session(Data, handshake_error, session_failure, invalid_open_message);
 %-- KEEPWAIT STATE -------------------------------------------------------------
@@ -189,7 +197,7 @@ handle_event(state_timeout, keepwait_timeout, keepwait, Data) ->
     stop_session(Data, handshake_error, session_failure,
                  keepalivewait_timed_out);
 handle_event(cast, {pcep, Msg}, keepwait, Data) ->
-    log_error(Data, "Unexpected PCEP message ~w received during handshake",
+    log_error(Data, "Unexpected PCEP message ~p received during handshake",
               [element(1, Msg)]),
     %TODO: The expected error value in this case is not clear.
     stop_session(Data, handshake_error, session_failure, session_failure);
@@ -212,7 +220,7 @@ handle_event(cast, {pcep, #pcep_msg_error{error_list = Errors}},
     {stop, Data2} = synchronize_handle_errors(Data, Errors),
     stop_session(Data2, sync_error);
 handle_event(cast, {pcep, Msg}, synchronize, Data) ->
-    log_error(Data, "Unexpected PCEP message during sunchronization: ~w",
+    log_error(Data, "Unexpected PCEP message during sunchronization: ~p",
               [Msg]),
     %TODO: The expected error value in this case is not clear.
     stop_session(Data, sync_error, lsp_state_sync_error, lsp_state_sync_error);
@@ -245,8 +253,11 @@ handle_event(cast, {pcep, _}, sync_wait, _Data) ->
 handle_event(enter, _, ready, Data) ->
     handler_ready(Data),
     {keep_state_and_data, []};
-handle_event({call, From}, {update_flow, FlowId, ReqRoute}, ready, Data) ->
-    NewData = initiate_flow_update(Data, FlowId, ReqRoute, From),
+handle_event({call, From}, {update_flow, FlowId, Route}, ready, Data) ->
+    NewData = initiate_flow_update(Data, FlowId, Route, From),
+    {keep_state, NewData};
+handle_event({call, From}, {initiate_flow, InitRoute}, ready, Data) ->
+    NewData = initiate_flow_initiate(Data, InitRoute, From),
     {keep_state, NewData};
 handle_event(cast, {pcep, #pcep_msg_report{report_list = Reports}},
              ready, Data) ->
@@ -277,6 +288,8 @@ handle_event(info, {flow_addition_accepted, Flow, Args}, ready, Data) ->
 handle_event(info, {flow_addition_rejected, Reason, Flow, Args}, ready, Data) ->
     {ok, Data2} = ready_flow_rejected(Data, Reason, Flow, Args),
     {keep_state, Data2};
+handle_event(info, {flow_init_accepted, _Flow, _Args}, ready, Data) ->
+    {keep_state, Data};
 handle_event(info, {flow_delegation_acccepted, Flow, Args}, ready, Data) ->
     {ok, Data2} = ready_delegation_accepted(Data, Flow, Args),
     {keep_state, Data2};
@@ -287,12 +300,12 @@ handle_event(info, {flow_delegation_rejected, Reason, Flow, Args},
 %-- ANY STATE ------------------------------------------------------------------
 handle_event(cast, {pcep, #pcep_msg_close{close = Close}}, _State, Data) ->
     Reason = Close#pcep_obj_close.reason,
-    log_info(Data, "PCEP Session closed by peer: ~w", [Reason]),
+    log_info(Data, "PCEP Session closed by peer: ~p", [Reason]),
     stop_session(Data, closed);
 handle_event(cast, {pcep, #pcep_msg_keepalive{}}, _State, Data) ->
     {keep_state, Data, update_deadtimer(Data)};
 handle_event(cast, {pcep, Msg}, _State, Data) ->
-    log_warn(Data, "Session received unexpected PCEP message: ~w", [Msg]),
+    log_warn(Data, "Session received unexpected PCEP message: ~p", [Msg]),
     %TODO: Limit the rate of unknown messages
     {keep_state_and_data, update_deadtimer(Data)};
 handle_event({timeout, keepalive}, keepalive, _State, Data) ->
@@ -304,11 +317,12 @@ handle_event({timeout, deadtimer}, deadtimer, _State, Data) ->
 handle_event(cast, connection_closed, _State, Data) ->
     log_info(Data, "Connection closed by peer"),
     stop_session(Data, closed);
-handle_event(cast, {warn, _, Warn}, _State, Data) ->
-    log_warn(Data, Warn),
+handle_event(cast, {warn, _, _Warn}, _State, Data) ->
+    % Disable warning due to usupported TLV 65505 noise
+    %log_warn(Data, Warn),
     {keep_state, Data};
 handle_event(cast, {error, connection, Reason}, _State, Data) ->
-    log_info(Data, "Connection error ~w", [Reason]),
+    log_info(Data, "Connection error ~p", [Reason]),
     stop_session(Data, closed);
 handle_event(cast, {error, decoding, Error}, _State, Data) ->
     log_error(Data, Error),
@@ -319,7 +333,7 @@ handle_event(cast, {error, encoding, Error}, _State, Data) ->
     log_error(Data, Error),
     stop_session(Data, {encoding_error, maps:get(type, Error, unknown)});
 handle_event(EventType, EventContent, State, Data) ->
-    log_debug(Data, "PCEP session received unexpected ~w event in state ~w: ~w",
+    log_debug(Data, "PCEP session received unexpected ~w event in state ~w: ~p",
               [EventType, State, EventContent]),
     {keep_state, Data}.
 
@@ -402,6 +416,7 @@ pcep_error_msg(ErrT, ErrV) ->
         ]
     }.
 
+flow_ident({_PccId, FlowId}) -> io_lib:format("~w", [FlowId]);
 flow_ident(#{id := Id, name := <<>>}) -> io_lib:format("~w", [Id]);
 flow_ident(#{id := Id, name := Name}) -> io_lib:format("~s (~w)", [Name, Id]).
 
@@ -596,7 +611,7 @@ handshake_negotiate(#data{tag = Tag} = Data, Open) ->
 handshake_errors(Data, []) ->
     {close, Data};
 handshake_errors(Data, [Error | Rest]) ->
-    log_error(Data, "Handshake error: ~w", [Error]),
+    log_error(Data, "Handshake error: ~p", [Error]),
     handshake_errors(Data, Rest).
 
 
@@ -644,7 +659,7 @@ synchronize_flow_accepted(#data{flows = Flows} = Data, Flow, _Report) ->
     {ok, Data#data{flows = Flows2}}.
 
 synchronize_flow_rejected(Data, Reason, Flow, _Report) ->
-    log_error(Data, "Flow ~s rejected during synchronization: ~w",
+    log_error(Data, "Flow ~s rejected during synchronization: ~p",
               [flow_ident(Flow), Reason]),
     % TODO: The error value is not clear in this usecase
     {stop, lsp_state_sync_error, lsp_state_sync_error, Data}.
@@ -652,7 +667,7 @@ synchronize_flow_rejected(Data, Reason, Flow, _Report) ->
 synchronize_handle_errors(Data, []) ->
     {stop, Data};
 synchronize_handle_errors(Data, [Error | Rest]) ->
-    log_error(Data, "Synchronization error: ~w", [Error]),
+    log_error(Data, "Synchronization error: ~p", [Error]),
     synchronize_handle_errors(Data, Rest).
 
 
@@ -671,50 +686,123 @@ ready_handle_reports(#data{proto = Proto} = Data, [Report | Rest]) ->
             ready_handle_reports(Data, Rest)
     end.
 
-ready_handle_report(#data{flows = Flows, pending_updates = UpMap} = Data,
+ready_handle_report(#data{flows = Flows, pending_reports = RepMap} = Data,
                     Report) ->
+    case pcep_server_flows:report_srp_id(Flows, Report) of
+        undefined -> ready_handle_generic_report(Data, Report);
+        SrpId ->
+            case maps:find(SrpId, RepMap) of
+                error ->
+                    ready_handle_unknown_srp_report(Data, SrpId, Report);
+                {ok, {{update, FlowId}, From}} ->
+                    ready_handle_update_report(#data{flows = Flows} = Data, SrpId, FlowId, From, Report);
+                {ok, {initiate, From}} ->
+                    ready_handle_initiate_report(#data{flows = Flows} = Data, SrpId, From, Report)
+            end
+    end.
+
+ready_handle_unknown_flow_report(#data{flows = Flows} = Data, Report) ->
+    case check(Report, [fun check_has_ident/1]) of
+        {error, _ErrT, _ErrV} = Error ->
+            Error;
+        ok ->
+            %TODO: handle flow unpacking errors
+            {ok, Flow} = pcep_server_flows:report_to_flow(Flows, Report),
+            handler_flow_added(Data, Flow, Report),
+            {ok, Data}
+    end.
+
+ready_handle_unknown_srp_report(#data{flows = Flows} = Data, SrpId, Report) ->
     case pcep_server_flows:report_to_events(Flows, Report) of
         %TODO: handle flow unpacking errors
         %TODO: Handle maximum rate of error
         {error, not_found} ->
             % First time we are seeing this flow
-            case check(Report, [fun check_has_ident/1]) of
-                {error, _ErrT, _ErrV} = Error ->
-                    Error;
-                ok ->
-                    %TODO: handle flow unpacking errors
-                    {ok, Flow} = pcep_server_flows:report_to_flow(Flows, Report),
-                    handler_flow_added(Data, Flow, Report),
-                    {ok, Data}
-            end;
-        {ok, Flow, undefined, Events} ->
-            log_debug(Data, "Received report for flow ~s, got events ~w",
+            ready_handle_unknown_flow_report(Data, Report);
+        {ok, Flow, Events} ->
+            %TODO: Shouldn't that fail ?
+            %      We are receiving reports with unknown SRP from FRR,
+            %      needs more investigation.
+            log_debug(Data, "Received report for flow ~s update ~w, with events ~p",
+                      [flow_ident(Flow), SrpId, Events]),
+            Flows2 = pcep_server_flows:update_flow(Flows, Flow),
+            ready_handle_report_events(Data#data{flows = Flows2}, Flow, Events)
+    end.
+
+
+ready_handle_generic_report(#data{flows = Flows} = Data, Report) ->
+    case pcep_server_flows:report_to_events(Flows, Report) of
+        %TODO: handle flow unpacking errors
+        %TODO: Handle maximum rate of error
+        {error, not_found} ->
+            % First time we are seeing this flow
+            ready_handle_unknown_flow_report(Data, Report);
+        {ok, Flow, Events} ->
+            log_debug(Data, "Received report for flow ~s, got events ~p",
                       [flow_ident(Flow), Events]),
             Flows2 = pcep_server_flows:update_flow(Flows, Flow),
-            ready_handle_report_events(Data#data{flows = Flows2}, Flow, Events);
-        {ok, #{id := Id, route := Route} = Flow, SrpId, Events} ->
-            Flows2 = pcep_server_flows:update_flow(Flows, Flow),
-            case maps:find(SrpId, UpMap) of
-                error ->
-                    %TODO: Shouldn't that fail ?
-                    log_info(Data, "Received report for flow ~s update ~w, with events ~w",
-                             [flow_ident(Flow), SrpId, Events]),
-                    Flows2 = pcep_server_flows:update_flow(Flows, Flow),
-                    ready_handle_report_events(Data#data{flows = Flows2}, Flow, Events);
-                {ok, {Id, From}} ->
-                    log_debug(Data, "Received report for flow ~s pending update ~w, got events ~w",
-                              [flow_ident(Flow), SrpId, Events]),
-                    case ready_handle_update_events(Data#data{flows = Flows2},
-                                                    Flow, Events) of
-                        {done, Data2} ->
-                            gen_statem:reply(From, {ok, Route}),
-                            UpMap2 = maps:remove(SrpId, UpMap),
-                            {ok, Data2#data{pending_updates = UpMap2}};
-                        {wait, Data2} ->
-                            {ok, Data2}
-                    end
+            ready_handle_report_events(Data#data{flows = Flows2}, Flow, Events)
+    end.
 
+
+ready_handle_update_report(#data{flows = Flows, pending_reports = RepMap} = Data,
+                           SrpId, FlowId, From, Report) ->
+    case pcep_server_flows:report_to_events(Flows, Report) of
+        %TODO: handle flow unpacking errors
+        %TODO: Handle maximum rate of error
+        {error, not_found} ->
+            % First time we are seeing this flow
+            ready_handle_unknown_flow_report(Data, Report);
+        {ok, #{id := FlowId, route := Route} = Flow, Events} ->
+            Flows2 = pcep_server_flows:update_flow(Flows, Flow),
+            log_debug(Data, "Received report ~w for flow ~s pending update, got events ~p",
+                      [SrpId, flow_ident(Flow), Events]),
+            case ready_handle_update_events(Data#data{flows = Flows2},
+                                            Flow, Events) of
+                {done, Data2} ->
+                    gen_statem:reply(From, {ok, Route}),
+                    RepMap2 = maps:remove(SrpId, RepMap),
+                    {ok, Data2#data{pending_reports = RepMap2}};
+                {wait, Data2} ->
+                    {ok, Data2}
             end
+    end.
+
+ready_handle_initiate_report(#data{flows = Flows, pending_reports = RepMap} = Data,
+                             SrpId, From, Report) ->
+    FlowId = pcep_server_flows:report_id(Flows, Report),
+    {Data3, Result} = case pcep_server_flows:has_flow(Flows, FlowId) of
+        false ->
+            {ok, Flow} = pcep_server_flows:report_to_flow(Flows, Report),
+            %TODO: handle flow unpacking errors
+            log_debug(Data, "Received first report ~w for initiated active flow ~s",
+                      [SrpId, flow_ident(Flow)]),
+            Flows2 = pcep_server_flows:add_flow(Flows, Flow),
+            Data2 = Data#data{flows = Flows2},
+            handler_flow_initiated(Data2, Flow, Report),
+            case Flow of
+                #{is_active := false, status := up} -> {Data2, {ok, Flow}};
+                #{is_active := true, status := active} -> {Data2, {ok, Flow}};
+                _ -> {Data2, undefined}
+            end;
+        true ->
+            {ok, Flow, Events} = pcep_server_flows:report_to_events(Flows, Report),
+            log_debug(Data, "Received new report ~w for initiated active flow ~s",
+                      [SrpId, flow_ident(FlowId)]),
+            Flows2 = pcep_server_flows:update_flow(Flows, Flow),
+            case ready_handle_update_events(Data#data{flows = Flows2},
+                                            Flow, Events) of
+                {done, Data2} -> {Data2, {ok, Flow}};
+                {wait, Data2} -> {Data2, undefined}
+            end
+    end,
+    case Result of
+        undefined ->
+            {ok, Data3};
+        _ ->
+            gen_statem:reply(From, Result),
+            RepMap2 = maps:remove(SrpId, RepMap),
+            {ok, Data3#data{pending_reports = RepMap2}}
     end.
 
 ready_handle_report_events(Data, _Flow, []) ->
@@ -726,7 +814,7 @@ ready_handle_report_events(Data, #{id := FlowId} = Flow,
     ready_handle_report_events(Data2, Flow, Rest);
 ready_handle_report_events(Data, Flow,
                            [{flow_route_changed, Route} | Rest]) ->
-    log_error(Data, "Unexpected route change for flow ~s: ~w",
+    log_error(Data, "Unexpected route change for flow ~s: ~p",
               [flow_ident(Flow), Route]),
     ready_handle_report_events(Data, Flow, Rest);
 ready_handle_report_events(Data, Flow, [_ | Rest]) ->
@@ -738,16 +826,16 @@ ready_handle_report_events(Data, Flow, [_ | Rest]) ->
 %       a status update without SRP for the flow, andles it as if there was one.
 %       NOT EFFICIENT AT ALL, SHOULD BE FIXED IN PATHD
 hack_for_pcc_not_puting_the_srp_in_all_reports(
-        #data{pending_updates = PenMap} = Data,
+        #data{pending_reports = RepMap} = Data,
         #{id := FlowId, is_active := IsActive, route := Route},
         NewStatus)
   when IsActive =:= true, NewStatus =:= active;
        IsActive =:= false, NewStatus =:= up ->
-    case [{K, F} || {K, {I, F}} <- maps:to_list(PenMap), I =:= FlowId] of
+    case [{K, F} || {K, {{update, I}, F}} <- maps:to_list(RepMap), I =:= FlowId] of
         [] -> Data;
         [{Key, From}] ->
             gen_statem:reply(From, {ok, Route}),
-            Data#data{pending_updates = maps:remove(Key, PenMap)}
+            Data#data{pending_reports = maps:remove(Key, RepMap)}
     end;
 hack_for_pcc_not_puting_the_srp_in_all_reports(Data, _Flow, _NewStatus) ->
     Data.
@@ -780,7 +868,7 @@ ready_flow_accepted(#data{flows = Flows} = Data, Flow, _Report) ->
 ready_flow_rejected(#data{flows = Flows} = Data,
                     Reason, #{is_delegated := true } = Flow, _Report) ->
     %TODO: Assum delegation is regected, add support for other errors
-    log_error(Data, "Added flow ~s delegation rejected: ~w",
+    log_error(Data, "Added flow ~s delegation rejected: ~p",
               [flow_ident(Flow), Reason]),
     Flow2 = Flow#{is_delegated => false},
     Flows2 = pcep_server_flows:add_flow(Flows, Flow2),
@@ -793,7 +881,7 @@ ready_delegation_accepted(#data{flows = Flows} = Data, Flow, _Args) ->
     {ok, send_update(Data#data{flows = Flows2}, Flow2)}.
 
 ready_delegation_rejected(#data{flows = Flows} = Data, Reason, Flow, _Args) ->
-    log_error(Data, "Flow ~s delegation rejected: ~w",
+    log_error(Data, "Flow ~s delegation rejected: ~p",
               [flow_ident(Flow), Reason]),
     Flow2 = Flow#{is_delegated => false},
     Flows2 = pcep_server_flows:update_flow(Flows, Flow2),
@@ -817,15 +905,17 @@ ready_handle_request(#data{flows = Flows} = Data, Request) ->
         %TODO: handle the requests with LSP object
         %TODO: If there is an associated flow, check it is not already delegated
         {request_flow, #{source := S, destination := D} = TeReq, undefined} ->
-            log_info(Data, "Received computation request for path between ~w and ~w",
-                     [S, D]),
+            log_info(Data, "Received computation request for path between ~s and ~s",
+                     [inet:ntoa(S), inet:ntoa(D)]),
             handler_requeste_route(Data, TeReq, Request),
             {ok, Data}
     end.
 
 ready_request_succeed(#data{proto = Proto, flows = Flows} = Data,
                       Route, PcepReq) ->
-    log_info(Data, "Route request succeed: ~w", [Route]),
+    #{source := S, destination := D} = Route,
+    log_info(Data, "Route request from ~s to ~s succeed: ~p",
+             [inet:ntoa(S), inet:ntoa(D), route_to_labels(Route)]),
     %TODO: If the request is associated with a flow we should add it to the cache
     {ok, CompRep} = pcep_server_flows:pack_comprep(Flows, PcepReq, Route),
     Msg = #pcep_msg_comprep{reply_list = [CompRep]},
@@ -834,7 +924,7 @@ ready_request_succeed(#data{proto = Proto, flows = Flows} = Data,
 
 ready_request_failed(#data{proto = Proto, flows = Flows} = Data,
                      Reason, Constraints, PcepReq) ->
-    log_error(Data, "Route request failed: ~w", [Reason]),
+    log_error(Data, "Route request failed: ~p", [Reason]),
     {ok, CompRep} =
         pcep_server_flows:pack_nopath(Flows, PcepReq, Reason, Constraints),
     Msg = #pcep_msg_comprep{reply_list = [CompRep]},
@@ -853,7 +943,7 @@ ready_handle_errors(Data, [Error | Rest]) ->
     Data2 = ready_handle_error(Data, Error),
     ready_handle_errors(Data2, Rest).
 
-ready_handle_error(#data{pending_updates = UpMap} = Data,
+ready_handle_error(#data{pending_reports = RepMap} = Data,
                    #pcep_error{id_list = Ids, errors = Errors}) ->
     %TODO: Close the session if required ?
     case [I || #pcep_obj_srp{srp_id = I} <- Ids] of
@@ -870,7 +960,7 @@ ready_handle_error(#data{pending_updates = UpMap} = Data,
                       lists:join(", ", [io_lib:format("~w/~w", [T, V])
                                         || #pcep_obj_error{type = T, value = V}
                                         <- Errors])]),
-            UpMap2 = lists:foldl(
+            RepMap2 = lists:foldl(
                 fun(I, M) ->
                     case maps:take(I, M) of
                         error -> M;
@@ -879,22 +969,36 @@ ready_handle_error(#data{pending_updates = UpMap} = Data,
                             gen_statem:reply(From, {error, update_error}),
                             M2
                     end
-                end, UpMap, SrpIds),
-            Data#data{pending_updates = UpMap2}
+                end, RepMap, SrpIds),
+            Data#data{pending_reports = RepMap2}
     end.
 
 
 %-- Flow Update Functions ------------------------------------------------------
 
-initiate_flow_update(Data, FlowId, ReqRoute, From) ->
+initiate_flow_update(Data, FlowId, Route, From) ->
     #data{proto = Proto, flows = Flows, next_srp_id = SrpId,
-          pending_updates = Pending} = Data,
-    {ok, Update} = pcep_server_flows:pack_update(Flows, SrpId, FlowId, ReqRoute),
+          pending_reports = RepMap} = Data,
+    {ok, Update} = pcep_server_flows:pack_update(Flows, SrpId, FlowId, Route),
     Msg = #pcep_msg_update{update_list = [Update]},
     gen_pcep_protocol:send(Proto, Msg),
     %TODO: add support for srp_id wrap around from 0xFFFFFFFE to 0x00000001
-    Data#data{pending_updates = Pending#{SrpId => {FlowId, From}},
+    Data#data{pending_reports = RepMap#{SrpId => {{update, FlowId}, From}},
               next_srp_id = SrpId + 1}.
+
+
+%-- Flow Initiate Functions ----------------------------------------------------
+
+initiate_flow_initiate(Data, InitRoute, From) ->
+    #data{proto = Proto, flows = Flows, next_srp_id = SrpId,
+          pending_reports = RepMap} = Data,
+    {ok, Initiate} = pcep_server_flows:pack_initiate(Flows, SrpId, InitRoute),
+    Msg = #pcep_msg_initiate{action_list = [Initiate]},
+    gen_pcep_protocol:send(Proto, Msg),
+    %TODO: add support for srp_id wrap around from 0xFFFFFFFE to 0x00000001
+    Data#data{pending_reports = RepMap#{SrpId => {initiate, From}},
+              next_srp_id = SrpId + 1}.
+
 
 %-- Handler Interface Functions ------------------------------------------------
 
@@ -917,6 +1021,9 @@ handler_checkpoint(#data{handler_pid = Pid}, Checkpoint) ->
 
 handler_opened(#data{peer = {Id, _}, handler_pid = Pid, peer_caps = Caps}) ->
     Pid ! {opened, Id, Caps, self()}.
+
+handler_flow_initiated(#data{handler_pid = Pid}, Flow, Args) ->
+    Pid ! {flow_initiated, Flow, Args}.
 
 handler_flow_added(#data{handler_pid = Pid}, Flow, Args) ->
     Pid ! {flow_added, Flow, Args}.
@@ -991,6 +1098,10 @@ handler_loop(Parent, State) ->
                     Parent ! {flow_addition_rejected, Reason, Flow, Args},
                     handler_loop(Parent, State)
             end;
+        {flow_initiated, Flow, Args} ->
+            {ok, NewState} = gen_pcep_handler:flow_initiated(Flow, State),
+            Parent ! {flow_init_accepted, Flow, Args},
+            handler_loop(Parent, NewState);
         {request_route, Req, Args} ->
             case gen_pcep_handler:request_route(Req, State) of
                 {ok, Route, NewState} ->
@@ -1023,3 +1134,10 @@ handler_loop(Parent, State) ->
             gen_pcep_handler:terminate(Reason, State),
             Parent ! handler_terminated
     end.
+
+
+%-- Utility Functions ----------------------------------------------------------
+
+%TODO: Duplicated in epce_server.erl
+route_to_labels(#{steps := Steps}) ->
+    [Sid#mpls_stack_entry.label || #{sid := Sid} <- Steps].

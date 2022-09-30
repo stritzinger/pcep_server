@@ -19,6 +19,9 @@
 -callback flow_added(Flow :: te_flow(), State :: term()) ->
     {ok, State :: term()} | {error, Reason :: term()}.
 
+-callback flow_initiated(Flow :: te_flow(), State :: term()) ->
+    {ok, State :: term()}.
+
 -callback ready(State :: term()) ->
     {ok, State :: term()}.
 
@@ -51,6 +54,7 @@
 -export([init/1]).
 -export([opened/4]).
 -export([flow_added/2]).
+-export([flow_initiated/2]).
 -export([ready/1]).
 -export([request_route/2]).
 -export([flow_delegated/2]).
@@ -75,6 +79,10 @@ flow_added(Flow, {Mod, State}) ->
         {error, _Reason} = Error -> Error;
 		{ok, NewState} -> {ok, {Mod, NewState}}
 	end.
+
+flow_initiated(Flow, {Mod, State}) ->
+    {ok, NewState} = Mod:flow_initiated(Flow, State),
+    {ok, {Mod, NewState}}.
 
 ready({Mod, State}) ->
     case Mod:ready(State) of

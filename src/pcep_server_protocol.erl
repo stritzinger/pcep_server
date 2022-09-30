@@ -68,7 +68,7 @@ init({Ref, Transport, [Factory]}) ->
     gen_server:enter_loop(?MODULE, [], State).
 
 handle_call(Request, From, #state{tag = Tag} = State) ->
-    logger:warning("[~s] PCEP server protocol received unexpected call from ~w: ~w",
+    logger:warning("[~s] PCEP server protocol received unexpected call from ~w: ~p",
                    [Tag, From, Request]),
     {reply, {error, unexpected_call}, State}.
 
@@ -89,7 +89,7 @@ handle_cast(close, #state{sock = S, tran = T, tag = Tag} = State) ->
     T:close(S),
     {noreply, State};
 handle_cast(Request, #state{tag = Tag} = State) ->
-    logger:warning("[~s] PCEP server protocol received unexpected cast: ~w",
+    logger:warning("[~s] PCEP server protocol received unexpected cast: ~p",
                    [Tag, Request]),
     {noreply, State}.
 
@@ -109,7 +109,7 @@ handle_info({tcp_error, Sock, Reason},
     gen_pcep_proto_session:connection_error(Sess, Reason),
     {stop, Reason, State};
 handle_info(Info, #state{tag = Tag} = State) ->
-    logger:warning("[~s] PCEP server protocol received unexpected message: ~w",
+    logger:warning("[~s] PCEP server protocol received unexpected message: ~p",
                    [Tag, Info]),
     {noreply, State}.
 
@@ -120,7 +120,7 @@ handle_continue(_Continue, State) ->
 terminate(normal, _State) ->
     ok;
 terminate(Reason, _State) ->
-    logger:warning("PCEP server protocol terminating: ~w", [Reason]),
+    logger:warning("PCEP server protocol terminating: ~p", [Reason]),
     ok.
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
@@ -142,7 +142,6 @@ decode_loop(#state{buff = Buff, sess = Sess, tag = _Tag} = State) ->
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             decode_loop(State#state{buff = RemData});
         {ok, Msg, Warnings, RemData} ->
-            % logger:debug("[~s] <<<<< ~w", [_Tag, Msg]),
             [gen_pcep_proto_session:decoding_warning(Sess, W) || W <- Warnings],
             gen_pcep_proto_session:pcep_message(Sess, Msg),
             decode_loop(State#state{buff = RemData})

@@ -71,6 +71,7 @@
     is_active := boolean(),
     status := te_opstatus(),
     name := binary(),
+    binding_label := srte_label() | undefined,
     route := te_route() | undefined
 }.
 
@@ -80,5 +81,14 @@
     destination := inet:ip_address(),
     can_be_loose := boolean(),
     bidirectional := boolean(),
+    constraints := [te_flow_constraint()]
+}.
+
+-type te_route_initiate() :: #{
+    name := binary(),
+    source := inet:ip_address(),
+    destination := inet:ip_address(),
+    binding_label := srte_label(),
+    steps := [srte_route_step()],
     constraints := [te_flow_constraint()]
 }.

@@ -10,6 +10,9 @@
 
 % API functions
 -export([init/1]).
+-export([report_srp_id/2]).
+-export([report_id/2]).
+-export([has_flow/2]).
 -export([add_flow/2]).
 -export([update_flow/2]).
 -export([report_to_flow/2]).
@@ -20,6 +23,7 @@
 -export([pack_nopath/4]).
 -export([pack_comprep/3]).
 -export([pack_update/4]).
+-export([pack_initiate/3]).
 
 
 %%% Records %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -33,6 +37,20 @@
 %%% API FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 init({Addr, 4189}) -> #state{pcc_id = Addr}.
+
+report_srp_id(_State, #pcep_report{srp = Srp}) ->
+    case Srp of
+        #pcep_obj_srp{srp_id = 0} -> undefined;
+        #pcep_obj_srp{srp_id = V} -> V;
+        _ -> undefine
+    end.
+
+report_id(#state{pcc_id = PccId}, #pcep_report{lsp = Lsp}) ->
+    #pcep_obj_lsp{plsp_id = Id} = Lsp,
+    {PccId, Id}.
+
+has_flow(#state{cache = Cache}, FlowId) ->
+    maps:find(FlowId, Cache) =/= error.
 
 add_flow(#state{cache = Cache} = State, #{id := Key} = Flow) ->
     error = maps:find(Key, Cache),
@@ -60,12 +78,7 @@ refine_flow(#state{cache = Cache}, #{id := Id, route := Route} = Flow) ->
     end.
 
 report_to_events(#state{cache = Cache} = State,
-                 #pcep_report{lsp = Lsp, srp = Srp} = Report) ->
-    SrpId = case Srp of
-        #pcep_obj_srp{srp_id = 0} -> undefined;
-        #pcep_obj_srp{srp_id = V} -> V;
-        _ -> undefine
-    end,
+                 #pcep_report{lsp = Lsp} = Report) ->
     case report_to_flow(State, Report) of
         %TODO: Handle unpacking errors
         {ok, #{id := Id, route := Route} = Flow} ->
@@ -89,7 +102,7 @@ report_to_events(#state{cache = Cache} = State,
                             Events2 = check_for_events(Events, RefFlow, Flow2, [
                                 fun check_for_route_change/3
                             ]),
-                            {ok, Flow2, SrpId, Events2};
+                            {ok, Flow2, Events2};
                         {FlowKeys, RouteKeys} ->
                             {error, {unexpected_changes, FlowKeys ++ RouteKeys}}
                     end
@@ -162,12 +175,13 @@ pack_comprep(_State, PcepReq, #{
         ]
     }}.
 
-pack_update(#state{cache = Cache}, SrpId, FlowId, ReqRoute) ->
+pack_update(#state{cache = Cache}, SrpId, FlowId, Route) ->
     %TODO: Add support for constraints
     case maps:find(FlowId, Cache) of
         error -> {error, flow_not_found};
         {ok, Flow} ->
-            #{steps := ReqSteps} =ReqRoute,
+            %TODO: Check for other changes than the route steps
+            #{steps := ReqSteps} = Route,
             #{
                 id := {_, PlspId},
                 is_delegated := IsDelegated,
@@ -188,6 +202,30 @@ pack_update(#state{cache = Cache}, SrpId, FlowId, ReqRoute) ->
                 metrics = []
             }}
     end.
+
+pack_initiate(#state{pcc_id = PccId}, SrpId, InitRoute) ->
+    %TODO: Check there is no flow with the same name
+    %TODO: Add support for constraints
+    #{source := PccId, destination := Dest, name := Name,
+      binding_label := Label, steps := ReqSteps} = InitRoute,
+    {ok, #pcep_lsp_init{
+        srp = #pcep_obj_srp{
+            srp_id = SrpId,
+            tlvs = [#pcep_tlv_path_setup_type{pst = srte}]
+        },
+        lsp = #pcep_obj_lsp{
+            flag_a = true,
+            tlvs = [
+                #pcep_tlv_symbolic_path_name{
+                    name = Name
+                },
+                #pcep_tlv_cisco_binding_label{label = Label}
+            ]
+        },
+        endpoint = pcep_endpoint(PccId, Dest),
+        ero = route_steps_to_ero(ReqSteps)
+    }}.
+
 
 %%% INTERNAL FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -244,6 +282,12 @@ report_to_flow_lsp(#state{pcc_id = PccId} = State,
             error -> undefined;
             {ok, #pcep_tlv_symbolic_path_name{name = N}} -> N
         end,
+    BindingLabel =
+        case pcep_server_utils:lookup_tlv(
+                [pcep_tlv_cisco_binding_label], Tlvs) of
+            error -> undefined;
+            {ok, #pcep_tlv_cisco_binding_label{label = L}} -> L
+        end,
     Route = maps:get(route, Acc, #{}),
     NewAcc = Acc#{
         id => {PccId, Id},
@@ -251,6 +295,7 @@ report_to_flow_lsp(#state{pcc_id = PccId} = State,
         is_active => IsActive,
         status => TeStatus,
         name => Name,
+        binding_label => BindingLabel,
         route => Route#{
             source => SenderAddr,
             destination => EndpointAddr,
@@ -407,7 +452,7 @@ check_for_removal(_Flow, #pcep_obj_lsp{flag_r = true}, Acc) ->
 check_for_removal(_Flow, _Lsp, Acc) ->
     Acc.
 
-% pcep_endpoint({_, _, _, _} = S, {_, _, _, _} = D) ->
-%     #pcep_obj_endpoint_ipv4_addr{flag_i = true, source = S, destination = D};
-% pcep_endpoint({_, _, _, _, _, _, _, _} = S, {_, _, _, _, _, _, _, _} = D) ->
-%     #pcep_obj_endpoint_ipv6_addr{flag_i = true, source = S, destination = D}.
+pcep_endpoint({_, _, _, _} = S, {_, _, _, _} = D) ->
+    #pcep_obj_endpoint_ipv4_addr{flag_i = true, source = S, destination = D};
+pcep_endpoint({_, _, _, _, _, _, _, _} = S, {_, _, _, _, _, _, _, _} = D) ->
+    #pcep_obj_endpoint_ipv6_addr{flag_i = true, source = S, destination = D}.
