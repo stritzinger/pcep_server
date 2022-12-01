@@ -1,11 +1,11 @@
 {"1.2.0",
 [{<<"codec_sequencer">>,
-  {git,"git@github.com:stritzinger/codec_sequencer.git",
+  {git,"https://github.com/stritzinger/codec_sequencer.git",
        {ref,"fc8760894f7962ef1497bf6ce4247eb75db9d5ca"}},
   1},
  {<<"pcep_codec">>,
-  {git,"git@github.com:stritzinger/pcep_codec.git",
-       {ref,"84dcc430b2aa427984c100cc19dd35d946b22ff9"}},
+  {git,"https://github.com/stritzinger/pcep_codec.git",
+       {ref,"ca5eb0822d9971ec4bcfb427a49b2e516081a126"}},
   0},
  {<<"ranch">>,{pkg,<<"ranch">>,<<"2.0.0">>},0}]}.
 [
